@@ -6,22 +6,16 @@ require('dotenv').config();
 const app = express();
 app.use(express.json());
 
-// CLÉ SECRÈTE (à mettre dans .env ET dans ton script Lua)
 const SECRET_KEY = process.env.SECRET_KEY;
-
-// Webhook de sécurité pour les alertes
 const SECURITY_WEBHOOK = process.env.WEBHOOK_SECURITY || null;
 
-// Tracking des tentatives échouées
 const failedAttempts = new Map();
 const blockedIPs = new Set();
 
-// Nettoyer les tentatives toutes les 10 minutes
 setInterval(() => {
     failedAttempts.clear();
 }, 10 * 60 * 1000);
 
-// Configuration des webhooks (À mettre dans .env)
 const WEBHOOKS = {
     logs: process.env.WEBHOOK_LOGS,
     brainrot_250k: process.env.WEBHOOK_250K,
@@ -32,24 +26,21 @@ const WEBHOOKS = {
 };
 
 // ========================================
-// FONCTION: Vérifier la signature HMAC
+// NOUVELLE FONCTION: Signature simplifiée
 // ========================================
-function verifySignature(body, signature) {
-    if (!signature) return false;
-    
-    // IMPORTANT: Trier les clés alphabétiquement pour avoir le même ordre
-    const sortedKeys = Object.keys(body).sort();
-    const sortedBody = {};
-    sortedKeys.forEach(key => {
-        sortedBody[key] = body[key];
-    });
-    
+function createSimpleSignature(body, fields) {
+    // Concaténer les valeurs dans l'ordre défini
+    const values = fields.map(field => body[field] || '').join('|');
     const hmac = crypto.createHmac('sha256', SECRET_KEY);
-    const bodyString = JSON.stringify(sortedBody);
-    hmac.update(bodyString);
-    const calculatedSignature = hmac.digest('hex');
+    hmac.update(values);
+    return hmac.digest('hex');
+}
+
+function verifySimpleSignature(body, signature, fields) {
+    if (!signature) return false;
+    const calculatedSignature = createSimpleSignature(body, fields);
     
-    console.log('📝 Body string:', bodyString);
+    console.log('📝 Signature string:', fields.map(f => body[f] || '').join('|'));
     console.log('🔐 Calculated signature:', calculatedSignature);
     console.log('📨 Received signature:', signature);
     
@@ -57,7 +48,7 @@ function verifySignature(body, signature) {
 }
 
 // ========================================
-// FONCTION: Vérifier le timestamp (anti-replay)
+// Vérifier le timestamp (anti-replay)
 // ========================================
 function isTimestampValid(timestamp) {
     if (!timestamp) return false;
@@ -69,29 +60,25 @@ function isTimestampValid(timestamp) {
     
     const diff = Math.abs(now - requestTime);
     
-    // Refuser si la requête a plus de 30 secondes
     return diff < 30000;
 }
 
 // ========================================
-// FONCTION: Valider le payload des logs
+// Valider le payload des logs
 // ========================================
 function validateLogsPayload(data) {
     const required = ['userId', 'playerName', 'displayName', 'accountAge', 'jobId', 'placeId', 'playersCount', 'executor', 'position', 'timestamp'];
     
-    // Vérifier que tous les champs requis sont présents
     for (const field of required) {
         if (!data[field]) {
             return { valid: false, error: `Missing field: ${field}` };
         }
     }
     
-    // Vérifier le timestamp (anti-replay attack)
     if (!isTimestampValid(data.timestamp)) {
         return { valid: false, error: 'Invalid or expired timestamp' };
     }
     
-    // Vérifier les types
     if (typeof data.userId !== 'string' || !/^\d+$/.test(data.userId)) {
         return { valid: false, error: 'Invalid userId format' };
     }
@@ -112,42 +99,30 @@ function validateLogsPayload(data) {
         return { valid: false, error: 'Invalid playersCount' };
     }
     
-    // Vérifier qu'il n'y a pas de ping Discord (@everyone, @here, <@userid>)
     const content = JSON.stringify(data);
     if (/@everyone|@here|<@\d+>|<@&\d+>/.test(content)) {
         return { valid: false, error: 'Ping detected in payload' };
-    }
-    
-    // Vérifier qu'il n'y a pas de champs supplémentaires suspects
-    const allowedFields = [...required, 'timestamp'];
-    for (const key in data) {
-        if (!allowedFields.includes(key)) {
-            return { valid: false, error: `Unexpected field: ${key}` };
-        }
     }
     
     return { valid: true };
 }
 
 // ========================================
-// FONCTION: Valider le payload brainrot
+// Valider le payload brainrot
 // ========================================
 function validateBrainrotPayload(data) {
     const required = ['brainrotName', 'generation', 'placeId', 'jobId', 'timestamp'];
     
-    // Vérifier que tous les champs requis sont présents
     for (const field of required) {
         if (!data[field]) {
             return { valid: false, error: `Missing field: ${field}` };
         }
     }
     
-    // Vérifier le timestamp (anti-replay attack)
     if (!isTimestampValid(data.timestamp)) {
         return { valid: false, error: 'Invalid or expired timestamp' };
     }
     
-    // Vérifier les types
     if (typeof data.brainrotName !== 'string' || data.brainrotName.length === 0) {
         return { valid: false, error: 'Invalid brainrotName' };
     }
@@ -164,18 +139,9 @@ function validateBrainrotPayload(data) {
         return { valid: false, error: 'Invalid jobId' };
     }
     
-    // Vérifier qu'il n'y a pas de ping Discord
     const content = JSON.stringify(data);
     if (/@everyone|@here|<@\d+>|<@&\d+>/.test(content)) {
         return { valid: false, error: 'Ping detected in payload' };
-    }
-    
-    // Vérifier qu'il n'y a pas de champs supplémentaires
-    const allowedFields = [...required, 'timestamp'];
-    for (const key in data) {
-        if (!allowedFields.includes(key)) {
-            return { valid: false, error: `Unexpected field: ${key}` };
-        }
     }
     
     return { valid: true };
@@ -186,7 +152,7 @@ app.get('/', (req, res) => {
     res.json({ 
         status: 'online', 
         service: 'Kryos Webhook Proxy',
-        version: '2.0.0 - HMAC Secured'
+        version: '2.1.0 - Simple HMAC'
     });
 });
 
@@ -197,8 +163,15 @@ app.post('/api/logs', async (req, res) => {
     try {
         const signature = req.headers['x-signature'];
         
-        // 1. Vérifier la signature HMAC
-        if (!verifySignature(req.body, signature)) {
+        // Ordre des champs pour la signature (DOIT être identique côté Lua)
+        const signatureFields = [
+            'userId', 'playerName', 'displayName', 'accountAge', 
+            'jobId', 'placeId', 'playersCount', 'executor', 
+            'position', 'timestamp'
+        ];
+        
+        // 1. Vérifier la signature
+        if (!verifySimpleSignature(req.body, signature, signatureFields)) {
             console.log('❌ Invalid signature for logs');
             return res.status(403).json({ error: 'Invalid signature' });
         }
@@ -265,8 +238,13 @@ app.post('/api/brainrot', async (req, res) => {
     try {
         const signature = req.headers['x-signature'];
         
-        // 1. Vérifier la signature HMAC
-        if (!verifySignature(req.body, signature)) {
+        // Ordre des champs pour la signature (DOIT être identique côté Lua)
+        const signatureFields = [
+            'brainrotName', 'generation', 'placeId', 'jobId', 'timestamp'
+        ];
+        
+        // 1. Vérifier la signature
+        if (!verifySimpleSignature(req.body, signature, signatureFields)) {
             console.log('❌ Invalid signature for brainrot');
             return res.status(403).json({ error: 'Invalid signature' });
         }
@@ -291,7 +269,6 @@ app.post('/api/brainrot', async (req, res) => {
             return res.status(400).json({ error: 'Generation too low or invalid' });
         }
 
-        // Déterminer le webhook et la couleur selon la génération
         let webhookUrl, embedColor;
         if (genNumber > 50000000) {
             webhookUrl = WEBHOOKS.brainrot_50m;
@@ -341,6 +318,6 @@ app.post('/api/brainrot', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Kryos Webhook Proxy (HMAC Secured) running on port ${PORT}`);
+    console.log(`🚀 Kryos Webhook Proxy (Simple HMAC) running on port ${PORT}`);
     console.log(`🔐 Secret Key: ${SECRET_KEY.substring(0, 10)}...`);
 });
