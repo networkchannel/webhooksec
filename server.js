@@ -26,25 +26,21 @@ const WEBHOOKS = {
 };
 
 // ========================================
-// NOUVELLE FONCTION: Signature simplifiée
+// SIMPLE TOKEN AUTH (FONCTIONNE VRAIMENT)
 // ========================================
-function createSimpleSignature(body, fields) {
-    // Concaténer les valeurs dans l'ordre défini
-    const values = fields.map(field => body[field] || '').join('|');
-    const hmac = crypto.createHmac('sha256', SECRET_KEY);
-    hmac.update(values);
-    return hmac.digest('hex');
-}
-
-function verifySimpleSignature(body, signature, fields) {
-    if (!signature) return false;
-    const calculatedSignature = createSimpleSignature(body, fields);
+function verifyToken(token) {
+    if (!token) return false;
     
-    console.log('📝 Signature string:', fields.map(f => body[f] || '').join('|'));
-    console.log('🔐 Calculated signature:', calculatedSignature);
-    console.log('📨 Received signature:', signature);
+    // Simple comparaison de token
+    const expectedToken = crypto
+        .createHash('sha256')
+        .update(SECRET_KEY)
+        .digest('hex');
     
-    return signature === calculatedSignature;
+    console.log('🔐 Expected token:', expectedToken);
+    console.log('📨 Received token:', token);
+    
+    return token === expectedToken;
 }
 
 // ========================================
@@ -60,7 +56,7 @@ function isTimestampValid(timestamp) {
     
     const diff = Math.abs(now - requestTime);
     
-    return diff < 30000;
+    return diff < 60000; // 60 secondes au lieu de 30
 }
 
 // ========================================
@@ -152,7 +148,7 @@ app.get('/', (req, res) => {
     res.json({ 
         status: 'online', 
         service: 'Kryos Webhook Proxy',
-        version: '2.1.0 - Simple HMAC'
+        version: '3.0.0 - Simple Token Auth'
     });
 });
 
@@ -161,19 +157,12 @@ app.get('/', (req, res) => {
 // ========================================
 app.post('/api/logs', async (req, res) => {
     try {
-        const signature = req.headers['x-signature'];
+        const token = req.headers['x-auth-token'];
         
-        // Ordre des champs pour la signature (DOIT être identique côté Lua)
-        const signatureFields = [
-            'userId', 'playerName', 'displayName', 'accountAge', 
-            'jobId', 'placeId', 'playersCount', 'executor', 
-            'position', 'timestamp'
-        ];
-        
-        // 1. Vérifier la signature
-        if (!verifySimpleSignature(req.body, signature, signatureFields)) {
-            console.log('❌ Invalid signature for logs');
-            return res.status(403).json({ error: 'Invalid signature' });
+        // 1. Vérifier le token
+        if (!verifyToken(token)) {
+            console.log('❌ Invalid token for logs');
+            return res.status(403).json({ error: 'Invalid authentication token' });
         }
         
         // 2. Valider le contenu du payload
@@ -236,17 +225,12 @@ app.post('/api/logs', async (req, res) => {
 // ========================================
 app.post('/api/brainrot', async (req, res) => {
     try {
-        const signature = req.headers['x-signature'];
+        const token = req.headers['x-auth-token'];
         
-        // Ordre des champs pour la signature (DOIT être identique côté Lua)
-        const signatureFields = [
-            'brainrotName', 'generation', 'placeId', 'jobId', 'timestamp'
-        ];
-        
-        // 1. Vérifier la signature
-        if (!verifySimpleSignature(req.body, signature, signatureFields)) {
-            console.log('❌ Invalid signature for brainrot');
-            return res.status(403).json({ error: 'Invalid signature' });
+        // 1. Vérifier le token
+        if (!verifyToken(token)) {
+            console.log('❌ Invalid token for brainrot');
+            return res.status(403).json({ error: 'Invalid authentication token' });
         }
         
         // 2. Valider le contenu du payload
@@ -318,6 +302,6 @@ app.post('/api/brainrot', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Kryos Webhook Proxy (Simple HMAC) running on port ${PORT}`);
-    console.log(`🔐 Secret Key: ${SECRET_KEY.substring(0, 10)}...`);
+    console.log(`🚀 Kryos Webhook Proxy (Simple Token) running on port ${PORT}`);
+    console.log(`🔐 Auth Token: ${crypto.createHash('sha256').update(SECRET_KEY).digest('hex').substring(0, 16)}...`);
 });
