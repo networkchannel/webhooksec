@@ -37,10 +37,20 @@ const WEBHOOKS = {
 function verifySignature(body, signature) {
     if (!signature) return false;
     
+    // Trier les clés alphabétiquement
+    const sortedBody = {};
+    Object.keys(body).sort().forEach(key => {
+        sortedBody[key] = body[key];
+    });
+    
     const hmac = crypto.createHmac('sha256', SECRET_KEY);
-    const bodyString = JSON.stringify(body);
+    const bodyString = JSON.stringify(sortedBody);
     hmac.update(bodyString);
     const calculatedSignature = hmac.digest('hex');
+    
+    console.log('📝 Body string:', bodyString);
+    console.log('🔐 Calculated signature:', calculatedSignature);
+    console.log('📨 Received signature:', signature);
     
     return signature === calculatedSignature;
 }
