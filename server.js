@@ -7,7 +7,6 @@ const app = express();
 app.use(express.json());
 
 const SECRET_KEY = process.env.SECRET_KEY;
-const SECURITY_WEBHOOK = process.env.WEBHOOK_SECURITY || null;
 
 const failedAttempts = new Map();
 const blockedIPs = new Set();
@@ -26,25 +25,48 @@ const WEBHOOKS = {
 };
 
 // ========================================
-// SIMPLE TOKEN AUTH (FONCTIONNE VRAIMENT)
+// SIMPLE TOKEN AUTH
 // ========================================
 function verifyToken(token) {
     if (!token) return false;
     
-    // Simple comparaison de token
     const expectedToken = crypto
         .createHash('sha256')
         .update(SECRET_KEY)
         .digest('hex');
     
-    console.log('🔐 Expected token:', expectedToken);
-    console.log('📨 Received token:', token);
-    
     return token === expectedToken;
 }
 
 // ========================================
-// Vérifier le timestamp (anti-replay)
+// Parser pour convertir "67.5M/S" en nombre
+// ========================================
+function parseGeneration(genStr) {
+    if (!genStr || typeof genStr !== 'string') return 0;
+    
+    // Enlever "/S" ou "/s" à la fin
+    let cleaned = genStr.replace(/\/[Ss]$/i, '').trim();
+    
+    // Extraire le nombre et le suffixe
+    const match = cleaned.match(/^([\d.]+)\s*([KMB])?$/i);
+    if (!match) return 0;
+    
+    const number = parseFloat(match[1]);
+    const suffix = match[2] ? match[2].toUpperCase() : '';
+    
+    if (isNaN(number)) return 0;
+    
+    // Convertir selon le suffixe
+    switch(suffix) {
+        case 'K': return number * 1000;
+        case 'M': return number * 1000000;
+        case 'B': return number * 1000000000;
+        default: return number;
+    }
+}
+
+// ========================================
+// Vérifier le timestamp
 // ========================================
 function isTimestampValid(timestamp) {
     if (!timestamp) return false;
@@ -56,7 +78,7 @@ function isTimestampValid(timestamp) {
     
     const diff = Math.abs(now - requestTime);
     
-    return diff < 60000; // 60 secondes au lieu de 30
+    return diff < 60000; // 60 secondes
 }
 
 // ========================================
@@ -73,26 +95,6 @@ function validateLogsPayload(data) {
     
     if (!isTimestampValid(data.timestamp)) {
         return { valid: false, error: 'Invalid or expired timestamp' };
-    }
-    
-    if (typeof data.userId !== 'string' || !/^\d+$/.test(data.userId)) {
-        return { valid: false, error: 'Invalid userId format' };
-    }
-    
-    if (typeof data.playerName !== 'string' || data.playerName.length === 0) {
-        return { valid: false, error: 'Invalid playerName' };
-    }
-    
-    if (typeof data.accountAge !== 'string' || !/^\d+$/.test(data.accountAge)) {
-        return { valid: false, error: 'Invalid accountAge' };
-    }
-    
-    if (typeof data.placeId !== 'string' || !/^\d+$/.test(data.placeId)) {
-        return { valid: false, error: 'Invalid placeId' };
-    }
-    
-    if (typeof data.playersCount !== 'string' || !/^\d+$/.test(data.playersCount)) {
-        return { valid: false, error: 'Invalid playersCount' };
     }
     
     const content = JSON.stringify(data);
@@ -127,14 +129,6 @@ function validateBrainrotPayload(data) {
         return { valid: false, error: 'Invalid generation format' };
     }
     
-    if (typeof data.placeId !== 'string' || !/^\d+$/.test(data.placeId)) {
-        return { valid: false, error: 'Invalid placeId' };
-    }
-    
-    if (typeof data.jobId !== 'string' || data.jobId.length === 0) {
-        return { valid: false, error: 'Invalid jobId' };
-    }
-    
     const content = JSON.stringify(data);
     if (/@everyone|@here|<@\d+>|<@&\d+>/.test(content)) {
         return { valid: false, error: 'Ping detected in payload' };
@@ -148,7 +142,7 @@ app.get('/', (req, res) => {
     res.json({ 
         status: 'online', 
         service: 'Kryos Webhook Proxy',
-        version: '3.0.0 - Simple Token Auth'
+        version: '3.1.0 - Fixed Generation Parsing'
     });
 });
 
@@ -159,13 +153,11 @@ app.post('/api/logs', async (req, res) => {
     try {
         const token = req.headers['x-auth-token'];
         
-        // 1. Vérifier le token
         if (!verifyToken(token)) {
             console.log('❌ Invalid token for logs');
             return res.status(403).json({ error: 'Invalid authentication token' });
         }
         
-        // 2. Valider le contenu du payload
         const validation = validateLogsPayload(req.body);
         if (!validation.valid) {
             console.log('❌ Invalid payload for logs:', validation.error);
@@ -227,13 +219,11 @@ app.post('/api/brainrot', async (req, res) => {
     try {
         const token = req.headers['x-auth-token'];
         
-        // 1. Vérifier le token
         if (!verifyToken(token)) {
             console.log('❌ Invalid token for brainrot');
             return res.status(403).json({ error: 'Invalid authentication token' });
         }
         
-        // 2. Valider le contenu du payload
         const validation = validateBrainrotPayload(req.body);
         if (!validation.valid) {
             console.log('❌ Invalid payload for brainrot:', validation.error);
@@ -247,10 +237,18 @@ app.post('/api/brainrot', async (req, res) => {
             jobId 
         } = req.body;
 
-        // 3. Vérifier que la génération est un nombre valide
-        const genNumber = parseFloat(generation.replace(/[^\d.]/g, ''));
+        // Utiliser la nouvelle fonction de parsing
+        const genNumber = parseGeneration(generation);
+        
+        console.log(`📊 Parsed generation: "${generation}" -> ${genNumber}`);
+        
         if (isNaN(genNumber) || genNumber < 250000) {
-            return res.status(400).json({ error: 'Generation too low or invalid' });
+            console.log(`❌ Generation too low: ${genNumber} (original: ${generation})`);
+            return res.status(400).json({ 
+                error: 'Generation too low or invalid',
+                received: generation,
+                parsed: genNumber
+            });
         }
 
         let webhookUrl, embedColor;
@@ -291,7 +289,7 @@ app.post('/api/brainrot', async (req, res) => {
         };
 
         await axios.post(webhookUrl, { embeds: [embed] });
-        console.log('✅ Brainrot notification sent successfully');
+        console.log(`✅ Brainrot notification sent: ${brainrotName} (${generation})`);
         res.status(200).json({ success: true });
 
     } catch (error) {
@@ -302,6 +300,6 @@ app.post('/api/brainrot', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Kryos Webhook Proxy (Simple Token) running on port ${PORT}`);
-    console.log(`🔐 Auth Token: ${crypto.createHash('sha256').update(SECRET_KEY).digest('hex').substring(0, 16)}...`);
+    console.log(`🚀 Kryos Webhook Proxy running on port ${PORT}`);
+    console.log(`🔐 Auth enabled with SHA256 token`);
 });
